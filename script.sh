@@ -19,7 +19,7 @@ sudo apt update
 rm $logpath/*.log
 
 #Execution de glpi-agent afin deffectuer linventaire
-glpi-agent --additional-content="inventory.json" --logfile=$logpath/glpi.log
+glpi-agent --server $glpiserver --additional-content="inventory.json" --logfile=$logpath/glpi.log
 
 rm inventory.json
 
