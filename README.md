@@ -1,25 +1,142 @@
-# CoBot V2.4
+# CoBot — Inventaire + Tests rapides / longs conditionnels
 
-Ce script, découpé en plusieurs fichiers permet d'utiliser un environnement d'inventorisation via un agent GLPI, effacer un/des disques via NWipe, tester les disques durs et la mémoire vive, tout en consignant le résultat des opérations dans un répertoire réseau NFS ou sur un serveur FTP.
+Objectif : inventorier une machine et exécuter des tests matériels clés en un run structuré :
+rapide d’abord, puis long uniquement si le test rapide passe (RAM, disques, CPU, GPU).
+Internet est requis uniquement pour l’installation/mise à jour ; l’exécution peut se faire en LAN.
 
-Il est étudié pour une installation/utilisation sur une distribution Linux basée sur Debian (testé et utilisé avec Debian-Live 11.7 sans interface graphique).
+Date : 2025-08-09
 
-* ***init.sh***
-Permet de récupérer automatiquement la dernière version de l'installateur du script (install.sh) depuis un chemin réseau / adresse web.
+---
 
-* ***main.conf***
-Permet de configurer les différentes variables (chemins, options) nécessaires au bon fonctionnement du script.
+## Contenu du pack
+- install.sh — Installe les prérequis APT + GLPI Agent, initialise les capteurs (best‑effort).
+- script.sh — Orchestrateur : saisie inventaire → fast tests → longs si PASS → envoi GLPI → exports → résumé.
+- mem.sh — RAM (memtester fast/long).
+- smart.sh — Stockage SMART short/long + hdparm -Tt.
+- cpu.sh — CPU (stress‑ng fast/long, contrôle thermique optionnel via sensors).
+- gpu.sh — GPU (glmark2 off‑screen fast/long, inventaire glxinfo/nvidia‑smi si dispo).
+- utils.sh — utilitaires communs.
+- main.conf — configuration centrale.
+- templates/inventory.dumb — modèle JSON pour GLPI.
+- CHANGELOG.md, README.md — docs.
 
-* ***install.sh***
-Permet d'installer l'agent GLPI, installe les paquets nécessaires à l'accès d'un serveur nfs, nwipe et télécharge le script général (script.sh), le script permettant le test des disques durs (smart.sh) ainsi que le logiciel de test de mémoire vive memtester.
+---
 
-* ***inventory.dumb***
-Fichier squelette, permettant de surcharger les informations envoyées à GLPI, utilisé afin de déterminer le nom de l'objet inventorié sans avoir à passer par la variable $hostname du système.
-  
-* ***script.sh***
-Permet à l'utilisateur final de saisir un numéro d'inventaire, correspondant ensuite au nom de l'ordinateur dans GLPI, d'éxecuter l'agent-glpi se connectant à un serveur via la fonction AUTH_BASIC d'Apache, monter un dossier partagé avec un serveur NFS afin d'y enregistrer les fichiers logs ou de les envoyer sur un serveur FTP, éxecuter un test de mémoire vive, lancer l'effacement des disques en excluant les périphériques USB, ainsi qu'éxecuter un test rapide, puis long des disques.
+## Prérequis
+- Debian/Ubuntu (ou dérivées) avec apt-get.
+- root requis pour installer et pour les tests matériels.
+- Internet requis lors du install.sh (APT + téléchargement GLPI Agent). Exécution ensuite possible sans Internet public si GLPI est en LAN.
 
-* ***smart.sh***
-Créé par Meliorator (irc://irc.freenode.net/Meliorator) et amélioré par Ranpha, ce script permet de lister l'ensemble des stockages présents sur la machine et d'effectuer un test SMART short ou long suivant l'option choisie lors de son appel.
+---
 
-Merci à M3GHAN et Doxah pour leurs contributions et tests.
+## Installation
+```
+sudo bash install.sh
+```
+- Met à jour les dépôts et installe :
+  `curl wget perl ca-certificates lsb-release smartmontools nvme-cli hdparm dmidecode pciutils usbutils memtester nfs-common stress-ng lm-sensors mesa-utils glmark2`
+- Télécharge et installe GLPI Agent depuis `glpiagentinstallurl` (vérifie SHA256 si fourni).
+- Met à jour `/etc/glpi-agent/agent.cfg` avec `server`/`user`/`password` si définis.
+- Lance `sensors-detect --auto` best‑effort pour activer les sondes.
+
+---
+
+## Utilisation (orchestrateur)
+```
+bash script.sh               # tests rapides puis longs conditionnels
+bash script.sh --fast-only   # tests rapides uniquement
+bash script.sh --server=https://glpi.intra.local  # override GLPI pour ce run
+```
+**Orchestration :**
+1) saisie du numéro d’inventaire (validation regex),
+2) création du dossier `{{logpath}}/{{INVENTAIRE}}/{{YYYYmmdd-HHMMSS}}/`,
+3) **FAST** : RAM (memtester), Disques (SMART short + hdparm), CPU (stress‑ng), GPU (glmark2 off‑screen),
+4) **LONG** si PASS des tests rapides correspondants,
+5) génération `inventory.json` + **envoi GLPI** (log dédié),
+6) **exports** NFS/FTP (optionnels),
+7) **résumé** (`SUMMARY.txt`).
+
+---
+
+## Paramètres `main.conf`
+
+### GLPI & sources
+- `glpiserver` (requis) — ex : `https://glpi.intra.local`
+- `httpuser`, `httppassword` — auth basique éventuelle
+- `glpiagentinstallurl` (requis) — installeur GLPI Agent (Perl “with snap”)
+- `glpiagent_sha256` (optionnel) — vérification d’intégrité
+- `downloadsource` (optionnel) — base pour auto‑update manuel (si vous l’ajoutez)
+
+### Journaux / exports
+- `logpath` (def. `/var/log/cobot`)
+- `nfspath`, `nfsmount` — export NFS optionnel
+- `ftphost`, `ftpuser`, `ftppassword`, `ftpdirectory` — export FTP optionnel
+
+### Mémoire (memtester)
+- `mem_fast_size_mb` (def. `64`), `mem_fast_passes` (def. `1`)
+- `mem_long_size_mb` (def. vide : auto min(512, MemAvailable/4), min 128)
+- `mem_long_passes` (def. `2`)
+
+### SMART (disques)
+- `smart_short_extra_s` (def. `30`) — marge ajoutée au temps recommandé
+- `smart_long_extra_s` (def. `60`) — marge ajoutée
+- `smart_nvme` (yes/no, def. `yes`)
+- `smart_sata` (yes/no, def. `yes`)
+- `hdparm_enabled` (yes/no, def. `yes`) — bench lecture non destructif
+
+### CPU
+- `cpu_fast_timeout_s` (def. `60`) — durée du stress rapide
+- `cpu_long_timeout_s` (def. `300`) — durée du stress long
+- `cpu_temp_max_c` (vide par défaut) — si défini et `sensors` dispo → **FAIL** si température CPU > seuil
+
+### GPU
+- `gpu_short_duration_s` (def. `30`) — durée du test court (`glmark2 --off-screen -b build`)
+- `gpu_long_timeout_s` (def. `300`) — fenêtre du test long (`--run-forever`, timeout considéré PASS)
+
+### Validation inventaire
+- `inventory_regex` (def. `^[A-Za-z0-9._-]{{3,64}}$`) — contrainte de saisie
+
+---
+
+## Exécution directe des modules (avancé)
+
+### RAM
+```
+bash mem.sh fast <run_dir>
+bash mem.sh long <run_dir>
+```
+→ écrit `MEM_fast.status` / `MEM_long.status` (PASS/FAIL/SKIP) + logs.
+
+### Disques
+```
+bash smart.sh short <run_dir>
+bash smart.sh long  <run_dir>
+```
+→ détecte NVMe+SATA/SCSI, attend **temps recommandé + marge**, collecte SMART, produit statuts + **hdparm** (en mode short).
+
+### CPU
+```
+bash cpu.sh fast <run_dir>
+bash cpu.sh long <run_dir>
+```
+→ `stress-ng`, `sensors` avant/après (si dispo), seuil `cpu_temp_max_c` optionnel.
+
+### GPU
+```
+bash gpu.sh fast <run_dir>
+bash gpu.sh long <run_dir>
+```
+→ `glmark2` off‑screen; collecte `glxinfo -B`/`nvidia-smi -L` si disponibles.
+
+---
+
+## Sorties
+Dans `{{logpath}}/{{INVENTAIRE}}/{{YYYYmmdd-HHMMSS}}/` :
+`inventory.json`, `system_info.txt`, `memtester_*.log`, `MEM_*.status`, `smart_*`, `SMART_*.status`, `hdparm_*.txt`, `cpu_*`, `CPU_*.status`, `gpu_*`, `GPU_*.status`, `glpi-agent.log`, `SUMMARY.txt`.
+
+---
+
+## Exemple de configuration
+Un exemple prêt à l’emploi est fourni : **`main.conf.example`** (à copier/adapter).
+
+_Remarque : si besoin, faites `chmod +x *.sh` après extraction._
